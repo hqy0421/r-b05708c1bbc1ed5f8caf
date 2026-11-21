@@ -13,3 +13,4 @@ API Reference
     pygam.links
     pygam.penalties
     pygam.callbacks
+    pygam.residuals

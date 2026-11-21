@@ -49,6 +49,12 @@ from pygam.penalties import (  # noqa: F401
     none,  # noqa: F401
     wrap_penalty,  # noqa: F401
 )
+from pygam.residuals import (
+    QuantileResidualResult,  # noqa: F401
+    RegionTailSummary,  # noqa: F401
+    poisson_randomized_quantile_residuals,
+    tail_exceedance_by_region,
+)
 from pygam.terms import (  # noqa: F401  # noqa: F401  # noqa: F401  # noqa: F401  # noqa: F401
     FactorTerm,
     Intercept,
@@ -700,9 +706,9 @@ class GAM(Core, MetaTermMixin):
 
         y_ = self.link.link(y, self.distribution)
         y_ = make_2d(y_, verbose=False)
-        assert np.isfinite(y_).all(), (
-            "transformed response values should be well-behaved."
-        )
+        assert np.isfinite(
+            y_
+        ).all(), "transformed response values should be well-behaved."
 
         # solve the linear problem
         return np.linalg.solve(
@@ -741,9 +747,9 @@ class GAM(Core, MetaTermMixin):
             # initialize the model
             self.coef_ = self._initial_estimate(Y, modelmat)
 
-        assert np.isfinite(self.coef_).all(), (
-            f"coefficients should be well-behaved, but found: {self.coef_}"
-        )
+        assert np.isfinite(
+            self.coef_
+        ).all(), f"coefficients should be well-behaved, but found: {self.coef_}"
 
         P = self._P()
         S = sp.sparse.diags(np.ones(m) * np.sqrt(EPS))  # improve condition
@@ -1041,8 +1047,8 @@ class GAM(Core, MetaTermMixin):
             )
         self.statistics_["scale"] = self.distribution.scale
         self.statistics_["cov"] = (
-            (B.dot(B.T)) * self.distribution.scale** 2
-        )  # parameter covariances. no need to remove a W because we are using W^2. Wood pg 184  # noqa: E501
+            B.dot(B.T)
+        ) * self.distribution.scale**2  # parameter covariances. no need to remove a W because we are using W^2. Wood pg 184  # noqa: E501
         self.statistics_["se"] = self.statistics_["cov"].diagonal() ** 0.5
         self.statistics_["AIC"] = self._estimate_AIC(y=y, mu=mu, weights=weights)
         self.statistics_["AICc"] = self._estimate_AICc(y=y, mu=mu, weights=weights)
@@ -2957,6 +2963,132 @@ class PoissonGAM(GAM):
         check_lengths(X, exposure)
 
         return self.predict_mu(X) * exposure
+
+    def randomized_quantile_residuals(self, X, y, exposure=None, obs_ids=None, seed=0):
+        """Compute randomized quantile residuals of observed counts.
+
+        Expected counts are the fitted model rates multiplied by each
+        row's exposure.  For each observed count a uniform point is drawn
+        from the jump interval of its Poisson cumulative distribution
+        function and mapped to a standard-normal quantile.  The draws are
+        keyed by stable observation ids and a seed, so reordering rows or
+        processing them in batches gives identical results.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, m_features)
+            containing the input dataset.
+
+        y : array-like of shape (n_samples, )
+            observed non-negative integer alarm counts.
+
+        exposure : array-like shape (n_samples, ) or None, default: None
+            containing exposures. if None, defaults to array of ones.
+            rows with zero exposure and zero count receive a NaN residual
+            and are reported separately; zero exposure with a non-zero
+            count raises a ValueError.
+
+        obs_ids : array-like of shape (n_samples, ) or None, default: None
+            stable per-row identifiers controlling the random draws.
+            None uses the row positions.  the residual for a given id is
+            unaffected by row ordering or batching.
+
+        seed : int, default: 0
+            non-negative integer seed combined with every observation id.
+
+        Returns
+        -------
+        result : QuantileResidualResult
+            per-row residuals in the original row order, expected counts,
+            and the indices of rows excluded for zero exposure.
+        """
+        if not self._is_fitted:
+            raise AttributeError("GAM has not been fitted. Call fit first.")
+
+        X = check_X(
+            X,
+            n_feats=self.statistics_["m_features"],
+            edge_knots=self.edge_knots_,
+            dtypes=self.dtype,
+            features=self.feature,
+            verbose=self.verbose,
+        )
+        y = check_y(y, self.link, self.distribution, verbose=self.verbose)
+        check_lengths(X, y)
+
+        # model rate per unit exposure
+        rate = self.predict_mu(X)
+        return poisson_randomized_quantile_residuals(
+            y=y,
+            mu=rate,
+            exposure=exposure,
+            obs_ids=obs_ids,
+            seed=seed,
+        )
+
+    def region_tail_exceedance(
+        self,
+        X,
+        y,
+        regions,
+        exposure=None,
+        obs_ids=None,
+        seed=0,
+        weights=None,
+        tail_level=0.05,
+    ):
+        """Randomized quantile residuals with weighted tail fractions.
+
+        Convenience wrapper that computes
+        :meth:`randomized_quantile_residuals` and then, per region, the
+        weighted fraction of residuals beyond the symmetric standard
+        normal thresholds from both the upper and the lower tail.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, m_features)
+            containing the input dataset.
+
+        y : array-like of shape (n_samples, )
+            observed non-negative integer alarm counts.
+
+        regions : array-like of shape (n_samples, )
+            region label of every row; numeric or string labels.
+
+        exposure : array-like shape (n_samples, ) or None, default: None
+            containing exposures. if None, defaults to array of ones.
+
+        obs_ids : array-like of shape (n_samples, ) or None, default: None
+            stable per-row identifiers controlling the random draws.
+
+        seed : int, default: 0
+            non-negative integer seed combined with every observation id.
+
+        weights : array-like of shape (n_samples, ) or None, default: None
+            row weights for the weighted exceedance fractions. None weights
+            each valid row by its expected count (exposure times rate).
+
+        tail_level : float, default: 0.05
+            two-sided tail level; each tail cuts at tail_level / 2.
+
+        Returns
+        -------
+        result : QuantileResidualResult
+            per-row residuals in the original row order.
+
+        summaries : dict
+            RegionTailSummary per region plus an "ALL" pooled entry.
+        """
+        result = self.randomized_quantile_residuals(
+            X, y, exposure=exposure, obs_ids=obs_ids, seed=seed
+        )
+        summaries = tail_exceedance_by_region(
+            result,
+            regions=regions,
+            weights=weights,
+            tail_level=tail_level,
+        )
+        return result, summaries
 
     def gridsearch(
         self,

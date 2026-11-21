@@ -11,6 +11,12 @@ from pygam.pygam import (
     LogisticGAM,
     PoissonGAM,
 )
+from pygam.residuals import (
+    QuantileResidualResult,
+    RegionTailSummary,
+    poisson_randomized_quantile_residuals,
+    tail_exceedance_by_region,
+)
 from pygam.terms import f, intercept, l, s, te
 
 __all__ = [
@@ -26,6 +32,10 @@ __all__ = [
     "f",
     "te",
     "intercept",
+    "QuantileResidualResult",
+    "RegionTailSummary",
+    "poisson_randomized_quantile_residuals",
+    "tail_exceedance_by_region",
 ]
 
 
